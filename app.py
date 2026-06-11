@@ -13,8 +13,11 @@ import time
 def ottieni_mappa_aule():
     url = "https://www.unipa.it/scuole/dimedicinaechirurgia/struttura/luoghi.html"
     mappa = {}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
     try:
-        response = requests.get(url)
+        response = requests.get(url, headers=headers)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         links = soup.find_all('a', href=re.compile(r'calendar\.seam\?oidAula=(\d+)'))
@@ -84,7 +87,7 @@ def estrai_orari_24h(testo):
         inizio = f"{int(orari[0].split(':')[0]):02d}:{orari[0].split(':')[1]}"
         fine = f"{int(orari[1].split(':')[0]):02d}:{orari[1].split(':')[1]}"
         return inizio, fine
-    return None, None
+    return None
 
 def analizza_disponibilita_aula_web(oid_aula, nome_aula, durata_minima_minuti, num_settimane):
     url_calendario = f"https://offertaformativa.unipa.it/offweb/public/aula/calendar.seam?oidAula={oid_aula}"
@@ -94,6 +97,8 @@ def analizza_disponibilita_aula_web(oid_aula, nome_aula, durata_minima_minuti, n
     opzioni.add_argument('--no-sandbox')
     opzioni.add_argument('--disable-dev-shm-usage')
     opzioni.add_argument('--disable-gpu')
+    opzioni.add_argument('--window-size=1920,1080')
+    opzioni.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
     
     driver = webdriver.Chrome(options=opzioni)
     
@@ -104,24 +109,28 @@ def analizza_disponibilita_aula_web(oid_aula, nome_aula, durata_minima_minuti, n
     try:
         driver.get(url_calendario)
         for settimana_corrente in range(num_settimane):
-            
             try:
-                # Aumentato il timeout a 10s per gestire la latenza dei server cloud
                 WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "fc-view")))
             except TimeoutException:
-                continue
+                pass
+            
+            tempo_attesa = 0
+            while tempo_attesa < 4.0:
+                if len(driver.find_elements(By.CLASS_NAME, "fc-event")) > 0:
+                    break
+                time.sleep(0.5)
+                tempo_attesa += 0.5
             
             try:
                 titolo_periodo = driver.find_element(By.CSS_SELECTOR, ".fc-toolbar h2").text
             except:
                 titolo_periodo = f"Settimana {settimana_corrente + 1}"
             
-            # Controllo immediato: se non ci sono eventi, l'aula è totalmente libera
             eventi_totali = driver.find_elements(By.CLASS_NAME, "fc-event")
+            
             if len(eventi_totali) == 0:
                 output_aula += f"[{titolo_periodo}] spazi da {ore_str} in {nome_aula}: lunedì-venerdì 8:00-19:00\n"
             else:
-                # Se ci sono eventi, procediamo all'analisi per colonne
                 intestazioni = driver.find_elements(By.CLASS_NAME, "fc-day-header")
                 giorni_tradotti = {"Lun": "lunedì", "Mar": "martedì", "Mer": "mercoledì", "Gio": "giovedì", "Ven": "venerdì", "Sab": "sabato", "Dom": "domenica"}
                 nomi_giorni = [giorni_tradotti.get(intesta.text.split()[0], intesta.text.split()[0].lower()) for intesta in intestazioni if intesta.text.strip() != ""]
@@ -149,7 +158,8 @@ def analizza_disponibilita_aula_web(oid_aula, nome_aula, durata_minima_minuti, n
                 try:
                     driver.find_element(By.CLASS_NAME, "fc-next-button").click()
                     time.sleep(1.5) 
-                except: break 
+                except: 
+                    break 
     except:
         pass
     finally:
@@ -157,7 +167,6 @@ def analizza_disponibilita_aula_web(oid_aula, nome_aula, durata_minima_minuti, n
         
     return output_aula
 
-# --- INTERFACCIA WEB STREAMLIT ---
 st.set_page_config(page_title="Prenotazione Aule Unipa", layout="centered")
 
 st.title("Ricerca Aule Libere Unipa")
@@ -178,24 +187,28 @@ if st.button("Avvia Scansione", type="primary"):
         
         progress_bar = st.progress(0)
         aule_valide = [id_aula for id_aula in mappa.keys() if id_aula not in AULE_DA_ESCLUDERE]
-        totale_aule = len(aule_valide)
-        aule_analizzate = 0
         
-        for id_aula in aule_valide:
-            nome_aula = mappa[id_aula]
-            risultato_aula = analizza_disponibilita_aula_web(id_aula, nome_aula, DURATA_LEZIONE_MINUTI, NUM_SETTIMANE)
-            if risultato_aula:
-                risultato_finale += risultato_aula
-                
-            aule_analizzate += 1
-            progress_bar.progress(aule_analizzate / totale_aule)
-        
-        if risultato_finale:
-            st.success("Scansione completata.")
-            st.text_area("Risultati (pronti da copiare):", risultato_finale, height=400)
+        if not aule_valide:
+            st.error("Errore di connessione o nessuna aula trovata.")
         else:
-            st.warning("Nessuna aula trovata con questi parametri.")
+            totale_aule = len(aule_valide)
+            aule_analizzate = 0
             
-        st.markdown("---")
-        st.caption("Aule escluse: aule di Caltanissetta, aule con <35 posti, Aula Nicolosi, aule in ristrutturazione")
-        st.caption("Verificare sempre manualmente dal sito per giorni di vacanza o imprevisti.")
+            for id_aula in aule_valide:
+                nome_aula = mappa[id_aula]
+                risultato_aula = analizza_disponibilita_aula_web(id_aula, nome_aula, DURATA_LEZIONE_MINUTI, NUM_SETTIMANE)
+                if risultato_aula:
+                    risultato_finale += risultato_aula
+                    
+                aule_analizzate += 1
+                progress_bar.progress(aule_analizzate / totale_aule)
+            
+            if risultato_finale:
+                st.success("Scansione completata.")
+                st.text_area("Risultati (pronti da copiare):", risultato_finale, height=400)
+            else:
+                st.warning("Nessuna aula trovata con questi parametri.")
+                
+            st.markdown("---")
+            st.caption("Aule escluse: aule di Caltanissetta, aule con <35 posti, Aula Nicolosi, aule in ristrutturazione")
+            st.caption("Verificare sempre manualmente dal sito per giorni di vacanza o imprevisti.")
