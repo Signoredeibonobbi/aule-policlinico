@@ -95,7 +95,6 @@ def analizza_disponibilita_aula_web(oid_aula, nome_aula, durata_minima_minuti, n
     opzioni.add_argument('--disable-dev-shm-usage')
     opzioni.add_argument('--disable-gpu')
     
-    # Su Streamlit Cloud bisogna specificare l'eseguibile di sistema
     driver = webdriver.Chrome(options=opzioni)
     
     ore = durata_minima_minuti / 60
@@ -105,42 +104,46 @@ def analizza_disponibilita_aula_web(oid_aula, nome_aula, durata_minima_minuti, n
     try:
         driver.get(url_calendario)
         for settimana_corrente in range(num_settimane):
-            WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CLASS_NAME, "fc-content-col")))
+            
+            try:
+                # Aumentato il timeout a 10s per gestire la latenza dei server cloud
+                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "fc-view")))
+            except TimeoutException:
+                continue
             
             try:
                 titolo_periodo = driver.find_element(By.CSS_SELECTOR, ".fc-toolbar h2").text
             except:
                 titolo_periodo = f"Settimana {settimana_corrente + 1}"
             
-            intestazioni = driver.find_elements(By.CLASS_NAME, "fc-day-header")
-            giorni_tradotti = {"Lun": "lunedì", "Mar": "martedì", "Mer": "mercoledì", "Gio": "giovedì", "Ven": "venerdì", "Sab": "sabato", "Dom": "domenica"}
-            nomi_giorni = [giorni_tradotti.get(intesta.text.split()[0], intesta.text.split()[0].lower()) for intesta in intestazioni if intesta.text.strip() != ""]
-            
-            colonne_giorni = driver.find_elements(By.CLASS_NAME, "fc-content-col")
-            spazi_trovati_nella_settimana = False
-            
-            for i, colonna in enumerate(colonne_giorni):
-                if i >= len(nomi_giorni): break
-                nome_giorno = nomi_giorni[i]
-                if nome_giorno in ["sabato", "domenica"]: continue
-                    
-                eventi_del_giorno = colonna.find_elements(By.CLASS_NAME, "fc-event")
-                orari_occupati = []
-                for evento in eventi_del_giorno:
-                    inizio, fine = estrai_orari_24h(evento.text)
-                    if inizio and fine:
-                        orari_occupati.append((inizio, fine))
+            # Controllo immediato: se non ci sono eventi, l'aula è totalmente libera
+            eventi_totali = driver.find_elements(By.CLASS_NAME, "fc-event")
+            if len(eventi_totali) == 0:
+                output_aula += f"[{titolo_periodo}] spazi da {ore_str} in {nome_aula}: lunedì-venerdì 8:00-19:00\n"
+            else:
+                # Se ci sono eventi, procediamo all'analisi per colonne
+                intestazioni = driver.find_elements(By.CLASS_NAME, "fc-day-header")
+                giorni_tradotti = {"Lun": "lunedì", "Mar": "martedì", "Mer": "mercoledì", "Gio": "giovedì", "Ven": "venerdì", "Sab": "sabato", "Dom": "domenica"}
+                nomi_giorni = [giorni_tradotti.get(intesta.text.split()[0], intesta.text.split()[0].lower()) for intesta in intestazioni if intesta.text.strip() != ""]
                 
-                buchi = calcola_spazi_liberi_filtrati(orari_occupati, durata_minima_minuti)
-                if buchi:
-                    spazi_trovati_nella_settimana = True
-                    testo_buchi = " e ".join(buchi)
-                    output_aula += f"[{titolo_periodo}] spazi da {ore_str} in {nome_aula}: {nome_giorno} {testo_buchi}\n"
-
-            if not spazi_trovati_nella_settimana and len(colonne_giorni) > 0:
-                 eventi_totali = driver.find_elements(By.CLASS_NAME, "fc-event")
-                 if len(eventi_totali) == 0:
-                     output_aula += f"[{titolo_periodo}] spazi da {ore_str} in {nome_aula}: lunedì-venerdì 8:00-19:00\n"
+                colonne_giorni = driver.find_elements(By.CLASS_NAME, "fc-content-col")
+                
+                for i, colonna in enumerate(colonne_giorni):
+                    if i >= len(nomi_giorni): break
+                    nome_giorno = nomi_giorni[i]
+                    if nome_giorno in ["sabato", "domenica"]: continue
+                        
+                    eventi_colonna = colonna.find_elements(By.CLASS_NAME, "fc-event")
+                    orari_occupati = []
+                    for evento in eventi_colonna:
+                        inizio, fine = estrai_orari_24h(evento.text)
+                        if inizio and fine:
+                            orari_occupati.append((inizio, fine))
+                    
+                    buchi = calcola_spazi_liberi_filtrati(orari_occupati, durata_minima_minuti)
+                    if buchi:
+                        testo_buchi = " e ".join(buchi)
+                        output_aula += f"[{titolo_periodo}] spazi da {ore_str} in {nome_aula}: {nome_giorno} {testo_buchi}\n"
 
             if settimana_corrente < num_settimane - 1:
                 try:
@@ -164,24 +167,22 @@ col1, col2 = st.columns(2)
 with col1:
     DURATA_LEZIONE_MINUTI = st.number_input("Durata (in minuti)", min_value=30, value=180, step=30)
 with col2:
-    NUM_SETTIMANE = st.number_input("Settimane da controllare", min_value=1, max_value=4, value=1)
+    NUM_SETTIMANE = st.number_input("Settimane da controllare (es. 1 = solo questa, 3 = questa + prossime due)", min_value=1, max_value=4, value=1)
 
 if st.button("Avvia Scansione", type="primary"):
     with st.spinner("Scansione in corso. Potrebbe volerci qualche minuto..."):
         mappa = ottieni_mappa_aule()
-        AULE_DA_ESCLUDERE = [556, 656, 657, 47, 43, 44, 45, 248, 829, 29, 41]
+        AULE_DA_ESCLUDERE = [556, 656, 657, 47, 43, 44, 45, 248, 829, 29, 41, 4, 249, 557]
         
         risultato_finale = ""
         
-        # Barra di progresso opzionale per feedback visivo
         progress_bar = st.progress(0)
-        totale_aule = len([a for a in mappa.keys() if a not in AULE_DA_ESCLUDERE])
+        aule_valide = [id_aula for id_aula in mappa.keys() if id_aula not in AULE_DA_ESCLUDERE]
+        totale_aule = len(aule_valide)
         aule_analizzate = 0
         
-        for id_aula, nome_aula in mappa.items():
-            if id_aula in AULE_DA_ESCLUDERE:
-                continue
-                
+        for id_aula in aule_valide:
+            nome_aula = mappa[id_aula]
             risultato_aula = analizza_disponibilita_aula_web(id_aula, nome_aula, DURATA_LEZIONE_MINUTI, NUM_SETTIMANE)
             if risultato_aula:
                 risultato_finale += risultato_aula
@@ -190,11 +191,11 @@ if st.button("Avvia Scansione", type="primary"):
             progress_bar.progress(aule_analizzate / totale_aule)
         
         if risultato_finale:
-            st.success("Scansione completata!")
-            st.text_area("Risultati (pronti da copiare):", risultato_finale, height=300)
+            st.success("Scansione completata.")
+            st.text_area("Risultati (pronti da copiare):", risultato_finale, height=400)
         else:
             st.warning("Nessuna aula trovata con questi parametri.")
             
         st.markdown("---")
-        st.caption("Aule escluse: Caltanissetta, <35 posti, Aula Nicolosi.")
+        st.caption("Aule escluse: aule di Caltanissetta, aule con <35 posti, Aula Nicolosi, aule in ristrutturazione")
         st.caption("Verificare sempre manualmente dal sito per giorni di vacanza o imprevisti.")
